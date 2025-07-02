@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pytube import YouTube
 from youtube_transcript_api import YouTubeTranscriptApi
 from typing import Optional
+import subprocess
+import json
 
 app = FastAPI(title="YouTube Downloader & Transcriber", version="1.0.0")
 
@@ -18,19 +19,43 @@ app.add_middleware(
 CONTACT = "@Ismail_memon"
 TG = "https://t.me/jieshuo_india"
 
-
 def verify_auth(authorization: Optional[str] = Query(None)):
     if (authorization or "").lower() != "ismail":
         raise HTTPException(status_code=401, detail="401: Unauthorized. Please include a valid authorization.")
     return authorization
 
-
 @app.get("/v1/download")
-async def download_video(url: str, quality: Optional[str] = Query("720p"), authorization: str = Depends(verify_auth)):
+async def download_video(url: str, quality: Optional[str] = Query(None), authorization: str = Depends(verify_auth)):
     try:
-        yt = YouTube(url)
-        stream = yt.streams.filter(progressive=True, file_extension="mp4", res=quality).first()
-        if not stream:
+        cmd = ["yt-dlp", "-j", url]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            raise Exception(result.stderr)
+        info = json.loads(result.stdout)
+        formats = info.get("formats", [])
+        video_list = []
+        for f in formats:
+            if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url"):
+                if quality:
+                    if str(f.get("height")) == quality.replace("p", ""):
+                        return {
+                            "TG-channel": TG,
+                            "creator": CONTACT,
+                            "title": info.get("title"),
+                            "author": info.get("uploader"),
+                            "length": info.get("duration"),
+                            "thumbnail_url": info.get("thumbnail"),
+                            "download_url": f.get("url"),
+                            "format": f.get("ext"),
+                            "quality": f.get("format_note")
+                        }
+                else:
+                    video_list.append({
+                        "url": f.get("url"),
+                        "format": f.get("ext"),
+                        "quality": f.get("format_note") or f.get("height")
+                    })
+        if quality:
             return JSONResponse(status_code=404, content={
                 "TG-channel": TG,
                 "creator": CONTACT,
@@ -39,11 +64,11 @@ async def download_video(url: str, quality: Optional[str] = Query("720p"), autho
         return {
             "TG-channel": TG,
             "creator": CONTACT,
-            "title": yt.title,
-            "author": yt.author,
-            "length": yt.length,
-            "thumbnail_url": yt.thumbnail_url,
-            "download_url": stream.url
+            "title": info.get("title"),
+            "author": info.get("uploader"),
+            "length": info.get("duration"),
+            "thumbnail_url": info.get("thumbnail"),
+            "available_videos": video_list
         }
     except Exception as e:
         return JSONResponse(status_code=500, content={
@@ -52,10 +77,10 @@ async def download_video(url: str, quality: Optional[str] = Query("720p"), autho
             "error": f"Failed to process video. Error: {str(e)}"
         })
 
-
 @app.get("/v1/transcript")
 async def get_transcript(url: str, authorization: str = Depends(verify_auth)):
     try:
+        from pytube import YouTube
         video_id = YouTube(url).video_id
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
         return {
